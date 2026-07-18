@@ -19,7 +19,10 @@ async function fetchUrl(targetUrl) {
 }
 
 const server = http.createServer(async (req, res) => {
-  console.log(JSON.stringify({ts:new Date().toISOString(),ip:req.socket.remoteAddress,xff:req.headers["x-forwarded-for"],path:req.url.substring(0,100)}));
+  const _logLine = JSON.stringify({ts:new Date().toISOString(),ip:req.socket.remoteAddress,xff:req.headers["x-forwarded-for"],ua:req.headers["user-agent"],path:req.url.substring(0,100)});
+  console.log(_logLine);
+  try{fs.appendFileSync("/tmp/req.log",_logLine+"
+");}catch(e){}
   const url = new URL(req.url, `http://localhost:${PORT}`);
   
   if (url.pathname === '/health') {

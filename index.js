@@ -119,6 +119,21 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify(info));
   }
 
+
+  if (url.pathname === '/mirror') {
+    if (!sharp) { res.writeHead(500); return res.end('no sharp'); }
+    const info = 'IP:' + req.socket.remoteAddress + ' XFF:' + (req.headers['x-forwarded-for']||'none') + ' UA:' + (req.headers['user-agent']||'none') + ' HOST:' + (req.headers.host||'none');
+    const lines = info.match(/.{1,90}/g) || [info];
+    const svgText = lines.map((l, i) => '<text x="5" y="' + (16+i*14) + '" font-family="monospace" font-size="11" fill="black">' + l.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</text>').join('');
+    const h = Math.max(50, 20 + lines.length * 14);
+    const svg = '<svg width="900" height="' + h + '" xmlns="http://www.w3.org/2000/svg"><rect width="900" height="' + h + '" fill="white"/>' + svgText + '</svg>';
+    sharp(Buffer.from(svg)).png().toBuffer().then(png => {
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.end(png);
+    }).catch(e => { res.writeHead(500); res.end(e.message); });
+    return;
+  }
+
   res.writeHead(404); res.end('not found');
 });
 

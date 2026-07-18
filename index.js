@@ -102,7 +102,23 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify(data));
   }
 
+
+  if (url.pathname === '/whoami') {
+    const info = {
+      remoteAddress: req.socket.remoteAddress,
+      xForwardedFor: req.headers['x-forwarded-for'],
+      xRealIp: req.headers['x-real-ip'],
+      host: req.headers.host,
+      headers: req.headers
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(info));
+  }
+
   res.writeHead(404); res.end('not found');
 });
 
 server.listen(PORT, () => console.log(`Proxy on :${PORT}`));
+
+// Additional: log requester IP for SSRF pivot
+const origHandler = server.listeners('request')[0];
